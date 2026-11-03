@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xrayrecon"
+version = "0.1.0"
+description = "X-ray reconstruction tools"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fire>=0.7.1",
+    "numpy>=2.2.6",
+    "opencv-python>=5.0.0.93",
+    "pyqt5>=5.15.11",
+    "pyqtgraph>=0.14.0",
+    "s3a>=0.7.0",
+    "scipy>=1.15.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["xrayrecon/xrayrecon"]
