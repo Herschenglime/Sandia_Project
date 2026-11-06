@@ -14,16 +14,19 @@ dependencies = [
     "pyqtgraph>=0.13",
     "qtextras",
     "s3a",
-    "numpy>=1.24",
+    "numpy>=1.24,<2",
     "scipy>=1.10",
     "scikit-image",
-    "opencv-python",
-    "pandas",
+    "opencv-python-headless<5",
+    "pandas<2",
     "matplotlib",
     "Pillow",
     "pygerber",
     "tifffile",
     "fire",
+    "imutils",
+    "tqdm",
+    "setuptools<81",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +34,8 @@ test = ["pytest>=7.4"]
 # CUDA execution requires a CUDA-enabled PyTorch build and a working driver.
 # CPU-only installations do not need this extra or a system CUDA compiler.
 cuda = ["torch>=2.3"]
+# Optional speedups for PyOpenGL rendering.
+speed = ["pyopengl-accelerate"]
 
 [tool.setuptools]
 package-dir = {"" = "xrayrecon"}
