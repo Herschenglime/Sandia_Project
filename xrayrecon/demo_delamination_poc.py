@@ -3,20 +3,24 @@ Delamination proof of concept: inject an open delamination into a voxelized
 PCB, simulate CT of the clean and defective boards, and save a slide figure.
 
 Pipeline:
-  1. Voxelize a Gerber stackup (default: PCBCT picture1).
+  1. Voxelize a Gerber stackup (default: PCBCT picture1). By default the
+     non-trace area of each copper layer is filled with FR4 (resin), as in
+     configs/jonathan_stackup.json, so the seeded gap is the only air inside
+     the board.
   2. Pick the FR4 substrate slab directly above a copper layer (default: the
      L5-GND plane) and, inside an irregular 2D blob, replace the bottom
      ``--gap-slices`` FR4 slices with AIR. Only FR4 voxels are changed, and
      the boolean ground-truth mask is kept.
-  3. Run ``simulate_ct_volume`` on a Z sub-range around the defect (the copper
-     layer, the slab, and the next copper layer) for both volumes, over a
-     small XY crop centred on the defect (``--crop 0`` for the full board).
-  4. Plot clean vs. defective at an XY slice inside the gap and an XZ
-     cross-section through the blob, next to the ground truth.
+  3. Run ``simulate_ct_volume`` on the full Z stack (or ``--z-range local``)
+     for both volumes, over a small XY crop centred on the defect
+     (``--crop 0`` for the full board).
+  4. Save a composite figure plus one PNG per panel, and an .npz that the
+     standalone 3D viewer (``--view-3d``) can reopen.
 
 Run from the xrayrecon/ directory:
     python demo_delamination_poc.py                      # 256x256 CPU default
     python demo_delamination_poc.py --backend cuda --crop 0
+    python demo_delamination_poc.py --view-3d demo_output/delamination_poc/<run>.npz
 """
 import argparse
 import json
@@ -26,10 +30,7 @@ from time import perf_counter
 import numpy as np
 from scipy import ndimage as ndi
 
-from xrayrecon.ct_simulation import simulate_ct_volume
 from xrayrecon.materials import MATERIAL_NAMES, MATERIALS_DB
-from xrayrecon.stackup import StackupConfig
-from xrayrecon.stackup_voxelize import voxelize_stackup_config
 
 DEFAULT_STACKUP = Path(
     "/home/paul/dev/Sandia_Project/CAD_CT_Dataset_PCBCT/picture1/picture1_stackup.json"
@@ -39,6 +40,14 @@ DEFAULT_OUT = Path(__file__).resolve().parent / "demo_output" / "delamination_po
 AIR_ID = MATERIAL_NAMES.index("AIR")
 COPPER_ID = MATERIAL_NAMES.index("COPPER")
 FR4_ID = MATERIAL_NAMES.index("FR4")
+
+# One colour per meaning, shared by every panel and the 3D view.
+GAP_RGB = (0.90, 0.10, 0.10)
+COPPER_RGB = (1.00, 0.55, 0.00)  # MATERIAL_COLORS["COPPER"]
+FR4_RGB = (0.80, 0.75, 0.55)
+AIR_RGB = (0.05, 0.05, 0.05)
+SECTION_RGB = (0.00, 0.63, 1.00)
+ZOOM_ASPECT = 2.0  # display stretch of the zoomed XZ panels, on top of the voxel aspect
 
 
 def parse_args():
@@ -59,13 +68,19 @@ def parse_args():
                    help="defect centre in board pixels (default: auto, on solid copper near traces)")
     p.add_argument("--crop", type=int, default=256,
                    help="XY crop size (px) around the defect for simulation; 0 = full board")
+    p.add_argument("--copper-fill", choices=["fr4", "air"], default="fr4",
+                   help="material between traces on copper layers (the stackup JSON says air)")
+    p.add_argument("--z-range", choices=["full", "local"], default="full",
+                   help="simulate the whole stack, or only the copper layers around the defect")
     p.add_argument("--z-margin", type=int, default=4,
-                   help="extra slices simulated beyond the copper layers on either side")
+                   help="with --z-range local: extra slices beyond the copper layers on either side")
     p.add_argument("--num-angles", type=int, default=None,
                    help="projection angles (default: max(H, W) of the simulated crop)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--baseline", action="store_true",
                    help="also run the naive threshold + morphology baseline (stretch goal)")
+    p.add_argument("--view-3d", type=Path, default=None, metavar="NPZ",
+                   help="open a saved run in a standalone 3D window instead of running the pipeline")
     return p.parse_args()
 
 
@@ -140,67 +155,234 @@ def dice(a, b):
     return float(2 * (a & b).sum() / denom) if denom else 1.0
 
 
-def make_figure(path, clean, defect, gt, z_gap, row_xz, z_labels, spacing, params, pred=None, dice_val=None):
+def material_rgb(labels, gap):
+    rgb = np.empty(labels.shape + (3,), dtype=np.float32)
+    rgb[:] = AIR_RGB
+    rgb[labels == FR4_ID] = FR4_RGB
+    rgb[labels == COPPER_ID] = COPPER_RGB
+    rgb[gap] = GAP_RGB
+    return rgb
+
+
+def material_rgba_3d(labels, gap):
+    """(Z, H, W) labels -> uint8 RGBA for GLVolumeItem: copper translucent
+    orange, FR4 barely visible, air invisible, seeded gap opaque red."""
+    rgba = np.zeros(labels.shape + (4,), dtype=np.uint8)
+    rgba[labels == FR4_ID] = (205, 190, 140, 2)
+    rgba[labels == COPPER_ID] = (255, 140, 0, 25)
+    rgba[gap] = (255, 30, 30, 255)
+    return rgba
+
+
+def view_3d(npz_path):
+    import pyqtgraph as pg
+    import pyqtgraph.opengl as gl
+
+    d = np.load(npz_path)
+    rgba = material_rgba_3d(d["material_ids"], d["gt_mask"])
+    # (Z, H, W) -> GL (x = W, y = H flipped so it matches the top-view figure, z = Z)
+    vol = np.ascontiguousarray(rgba[:, ::-1].transpose(2, 1, 0, 3))
+    nx, ny, nz = vol.shape[:3]
+    spacing = d["spacing_mm"]
+
+    app = pg.mkQApp("Delamination 3D")
+    view = gl.GLViewWidget()
+    view.setWindowTitle(f"Seeded delamination (red), Z exaggerated {spacing[0] / spacing[2]:.0f}x"
+                        f" - {Path(npz_path).name}")
+    view.setBackgroundColor((30, 30, 34))
+    item = gl.GLVolumeItem(vol, smooth=False)
+    item.translate(-nx / 2, -ny / 2, -nz / 2)
+    view.addItem(item)
+    grid = gl.GLGridItem()
+    grid.setSize(nx, ny)
+    grid.setSpacing(16, 16)
+    grid.translate(0, 0, -nz / 2)
+    view.addItem(grid)
+    view.setCameraPosition(distance=1.8 * max(nx, ny), elevation=25, azimuth=-60)
+    view.resize(1200, 800)
+    view.show()
+    pg.exec()
+
+
+# ── Figure ──────────────────────────────────────────────────────────────────
+
+def _xz_extent(x0, x1, z0, z1):
+    return (x0 - 0.5, x1 - 0.5, z0 - 0.5, z1 - 0.5)
+
+
+def _z_ticks(ax, S, z0, z1, with_gap=False):
+    ticks = [(z, name) for z, name in S.cu_ticks if z0 <= z < z1]
+    if with_gap:
+        ticks.append((S.gap_mid, "gap"))
+    ticks.sort()
+    ax.set_yticks([z for z, _ in ticks])
+    ax.set_yticklabels([name for _, name in ticks], fontsize=8)
+    for lbl, (_, name) in zip(ax.get_yticklabels(), ticks):
+        if name == "gap":
+            lbl.set_color(GAP_RGB)
+            lbl.set_fontweight("bold")
+
+
+def draw_where(ax, S):
+    import matplotlib.patches as mpatches
+
+    img = np.empty(S.board_plane.shape + (3,), dtype=np.float32)
+    img[:] = FR4_RGB
+    img[S.board_plane] = np.array(FR4_RGB) * 0.85
+    img[S.board_traces] = COPPER_RGB
+    img[S.board_blob] = GAP_RGB
+    ax.imshow(img, interpolation="nearest")
+    rs, cs = S.rows, S.cols
+    ax.add_patch(mpatches.Rectangle((cs.start - 0.5, rs.start - 0.5), cs.stop - cs.start,
+                                    rs.stop - rs.start, fill=False, ec="black", lw=1.5, ls="--"))
+    ax.plot([cs.start, cs.stop - 1], [S.row_global] * 2, color=SECTION_RGB, lw=1.2)
+    bar = 10 / S.spacing[0]
+    h = img.shape[0]
+    ax.plot([10, 10 + bar], [h - 14] * 2, color="black", lw=3)
+    ax.text(10 + bar / 2, h - 22, "10 mm", ha="center", fontsize=8)
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title("A. Where: board top view", fontsize=12, fontweight="bold", loc="left")
+    ax.legend(handles=[
+        mpatches.Patch(color=COPPER_RGB, label=f"{S.trace_name} traces (above)"),
+        mpatches.Patch(color=np.array(FR4_RGB) * 0.85, label=f"{S.plane_name} plane (below)"),
+        mpatches.Patch(color=GAP_RGB, label="seeded air gap"),
+        mpatches.Patch(fill=False, ec="black", ls="--", label="simulated crop"),
+        mpatches.Patch(color=SECTION_RGB, label="cross-section line"),
+    ], loc="upper left", bbox_to_anchor=(0, -0.01), ncol=2, fontsize=7, frameon=False)
+
+
+def draw_model_xz(ax, S, zoom=False):
+    sec = material_rgb(S.labels[:, S.row, :], S.gt[:, S.row, :])
+    x0, x1, z0, z1 = S.zoom if zoom else (0, sec.shape[1], 0, sec.shape[0])
+    ax.imshow(sec[z0:z1, x0:x1], origin="lower", interpolation="nearest",
+              extent=_xz_extent(x0, x1, z0, z1), aspect=ZOOM_ASPECT if zoom else 1.0)
+    _z_ticks(ax, S, z0, z1, with_gap=zoom)
+    ax.set_xticks([])
+    if zoom:
+        ax.set_title(f"B'. Zoom: {S.gap_um:.0f} um air layer (Z x{S.exag * ZOOM_ASPECT:.0f})",
+                     fontsize=11, fontweight="bold", loc="left")
+    else:
+        _zoom_box(ax, S)
+        ax.set_title(f"B. What we seeded: voxel model, XZ section (Z x{S.exag:.0f})",
+                     fontsize=12, fontweight="bold", loc="left")
+
+
+def _zoom_box(ax, S):
+    import matplotlib.patches as mpatches
+
+    x0, x1, z0, z1 = S.zoom
+    ax.add_patch(mpatches.Rectangle((x0 - 0.5, z0 - 0.5), x1 - x0, z1 - z0,
+                                    fill=False, ec="white", lw=1.2, ls="--"))
+
+
+def draw_ct_xz(ax, S, data, zoom=False, contour=False, title=None):
+    x0, x1, z0, z1 = S.zoom if zoom else (0, data.shape[2], 0, data.shape[0])
+    sec = data[z0:z1, S.row, x0:x1]
+    ax.imshow(sec, cmap="gray", vmin=S.vmin, vmax=S.vmax, origin="lower", interpolation="nearest",
+              extent=_xz_extent(x0, x1, z0, z1), aspect=ZOOM_ASPECT if zoom else 1.0)
+    if contour:
+        gt = S.gt[z0:z1, S.row, x0:x1].astype(float)
+        if gt.any():
+            ax.contour(np.arange(x0, x1), np.arange(z0, z1), gt, levels=[0.5],
+                       colors=[GAP_RGB], linestyles="--", linewidths=1.0)
+    _z_ticks(ax, S, z0, z1, with_gap=zoom)
+    ax.set_xticks([])
+    if not zoom:
+        _zoom_box(ax, S)
+    if title:
+        ax.set_title(title, fontsize=11 if zoom else 12, fontweight="bold", loc="left")
+
+
+def draw_ct_plan(ax, S):
+    ax.imshow(S.defect[S.z_gap], cmap="gray", vmin=S.vmin, vmax=S.vmax, interpolation="nearest")
+    traces = (S.labels[S.trace_z] == COPPER_ID).astype(float)
+    ax.contour(traces, levels=[0.5], colors=[COPPER_RGB], linewidths=0.5, alpha=0.4)
+    ax.contour(S.gt[S.z_gap].astype(float), levels=[0.5], colors=[GAP_RGB],
+               linestyles="--", linewidths=1.2)
+    if S.pred is not None:
+        ax.contour(S.pred[S.z_gap].astype(float), levels=[0.5], colors=["#30b0ff"], linewidths=1.0)
+    ax.axhline(S.row, color=SECTION_RGB, lw=1)
+    ax.set_xticks([]); ax.set_yticks([])
+    title = "D. Simulated CT at gap depth (defective)"
+    if S.pred is not None:
+        title += f"\n    baseline in blue, Dice {S.dice:.2f}"
+    ax.set_title(title, fontsize=12, fontweight="bold", loc="left")
+    ax.text(0.02, 0.02, f"orange: {S.trace_name} trace outlines\nred dashed: ground truth\n"
+            "clean board here = uniform FR4", transform=ax.transAxes, fontsize=7,
+            color="white", va="bottom", bbox=dict(fc="black", alpha=0.5, lw=0))
+
+
+def make_figures(stem, S):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import ListedColormap
 
-    # Window: FR4 mid-grey, air black, copper saturated white.
-    fr4_level = float(np.median(clean[z_gap]))
-    vmin, vmax = 0.0, 2.5 * fr4_level
-    z_exag = 4.0  # display px per Z slice relative to one XY px
-    aspect_xz = z_exag
-    true_exag = z_exag * spacing[0] / spacing[2]
+    title = (f"Seeded open delamination: {S.gap_um:.0f} um air gap between the {S.plane_name} plane "
+             f"and FR4, ~{S.blob_area_mm2:.0f} mm$^2$ (picture1, synthetic)")
+    footer = ("Gerber -> voxel model -> slice-wise parallel-beam FBP (skimage radon/iradon), no noise. "
+              f"Copper-layer gaps filled with {S.copper_fill.upper()}. Voxel "
+              f"{S.spacing[0] * 1000:.0f} x {S.spacing[1] * 1000:.0f} x {S.spacing[2] * 1000:.0f} um. "
+              "Single sample.\nBlack/white banding inside signal-copper layers is FBP streaking "
+              "from dense copper, not air; the seeded gap is the only air in the model.")
 
-    ncols = 4 if pred is not None else 3
-    fig, axes = plt.subplots(2, ncols, figsize=(4.2 * ncols, 7.2),
-                             gridspec_kw=dict(height_ratios=[1, 0.5]))
-    mask_cmap = ListedColormap(["#111111", "#ff3b30"])
-    pred_cmap = ListedColormap(["#111111", "#30b0ff"])
-
-    cols = [("Clean CT", clean, "gray", vmin, vmax),
-            ("Defective CT", defect, "gray", vmin, vmax),
-            ("Ground-truth gap", gt.astype(np.uint8), mask_cmap, 0, 1)]
-    if pred is not None:
-        cols.append((f"Naive baseline (Dice {dice_val:.2f})", pred.astype(np.uint8), pred_cmap, 0, 1))
-
-    h, w = clean.shape[1:]
-    for c, (title, data, cmap, lo, hi) in enumerate(cols):
-        ax = axes[0, c]
-        ax.imshow(data[z_gap], cmap=cmap, vmin=lo, vmax=hi, interpolation="nearest")
-        ax.axhline(row_xz, color="#ffcc00", lw=1, ls="--")
-        ax.set_title(title, fontsize=14, fontweight="bold")
-        ax.set_xticks([]); ax.set_yticks([])
-        if c == 0:
-            ax.set_ylabel(f"XY slice in gap\n({h * spacing[0]:.1f} x {w * spacing[1]:.1f} mm)", fontsize=12)
-
-        ax = axes[1, c]
-        ax.imshow(data[:, row_xz, :], cmap=cmap, vmin=lo, vmax=hi, origin="lower",
-                  aspect=aspect_xz, interpolation="nearest")
-        ax.set_xticks([])
-        if c == 0:
-            ax.set_yticks([z for z, _ in z_labels])
-            ax.set_yticklabels([name for _, name in z_labels], fontsize=9)
-            ax.set_ylabel(f"XZ section at dashed line\n(Z exaggerated {true_exag:.0f}x)", fontsize=12)
-        else:
-            ax.set_yticks([])
-
-    fig.suptitle(
-        f"Synthetic open delamination: {params['gap_um']:.0f} um air gap above {params['layer_short']}, "
-        f"~{params['blob_area_mm2']:.0f} mm$^2$ blob",
-        fontsize=15, fontweight="bold")
-    fig.text(0.5, 0.01,
-             "Gerber -> voxel -> slice-wise parallel-beam FBP (skimage radon/iradon), no noise. "
-             f"Voxel {spacing[0] * 1000:.0f} x {spacing[1] * 1000:.0f} x {spacing[2] * 1000:.0f} um. Single sample.",
-             ha="center", fontsize=10, color="#555555")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.95))
-    fig.savefig(path, dpi=200)
+    fig = plt.figure(figsize=(16, 9))
+    gs = fig.add_gridspec(2, 3, width_ratios=[1, 1.75, 1.0], left=0.07, right=0.99,
+                          top=0.89, bottom=0.09, wspace=0.22, hspace=0.32)
+    draw_where(fig.add_subplot(gs[0, 0]), S)
+    draw_model_xz(fig.add_subplot(gs[0, 1]), S)
+    draw_model_xz(fig.add_subplot(gs[0, 2]), S, zoom=True)
+    draw_ct_plan(fig.add_subplot(gs[1, 0]), S)
+    draw_ct_xz(fig.add_subplot(gs[1, 1]), S, S.defect,
+               title=f"C. What CT sees: simulated CT, same section (Z x{S.exag:.0f})")
+    sub = gs[1, 2].subgridspec(2, 1, hspace=0.35)
+    draw_ct_xz(fig.add_subplot(sub[0]), S, S.clean, zoom=True, title="C'. Zoom: clean board")
+    draw_ct_xz(fig.add_subplot(sub[1]), S, S.defect, zoom=True, contour=True,
+               title="C''. Zoom: delaminated board")
+    fig.text(0.012, 0.70, "VOXEL MODEL\n(what we seeded)", rotation=90, va="center", ha="center",
+             fontsize=12, fontweight="bold", color="#444444")
+    fig.text(0.012, 0.28, "SIMULATED CT\n(what a scan shows)", rotation=90, va="center",
+             ha="center", fontsize=12, fontweight="bold", color="#444444")
+    fig.suptitle(title, fontsize=15, fontweight="bold")
+    fig.text(0.5, 0.012, footer, ha="center", fontsize=9, color="#555555")
+    paths = [stem.with_name(stem.name + ".png")]
+    fig.savefig(paths[0], dpi=200)
     plt.close(fig)
 
+    panels = {
+        "A_where": ((6, 6.5), [lambda ax: draw_where(ax, S)]),
+        "B_model_xz": ((10, 5), [lambda ax: draw_model_xz(ax, S)]),
+        "B_model_zoom": ((6, 4), [lambda ax: draw_model_xz(ax, S, zoom=True)]),
+        "C_ct_xz": ((10, 5), [lambda ax: draw_ct_xz(ax, S, S.defect, title="Simulated CT, XZ section")]),
+        "C_ct_zoom": ((6, 6), [
+            lambda ax: draw_ct_xz(ax, S, S.clean, zoom=True, title="Clean board"),
+            lambda ax: draw_ct_xz(ax, S, S.defect, zoom=True, contour=True, title="Delaminated board"),
+        ]),
+        "D_ct_plan": ((6, 6), [lambda ax: draw_ct_plan(ax, S)]),
+    }
+    for name, (size, drawers) in panels.items():
+        fig, axes = plt.subplots(len(drawers), 1, figsize=size, squeeze=False)
+        for ax, draw in zip(axes[:, 0], drawers):
+            draw(ax)
+        fig.tight_layout()
+        paths.append(stem.with_name(f"{stem.name}_panel{name}.png"))
+        fig.savefig(paths[-1], dpi=200)
+        plt.close(fig)
+    return paths
+
+
+# ── Pipeline ────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
+    if args.view_3d is not None:
+        view_3d(args.view_3d)
+        return
+
+    from types import SimpleNamespace
+    from xrayrecon.ct_simulation import simulate_ct_volume
+    from xrayrecon.stackup import StackupConfig
+    from xrayrecon.stackup_voxelize import voxelize_stackup_config
+
     args.out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
     t0 = perf_counter()
@@ -208,6 +390,9 @@ def main():
     # 1. Voxelize: vol is (Z, H, W, 2) = [z_eff, rel. electron density], Z
     # runs bottom -> top in stackup order; material_ids is (Z, H, W).
     config = StackupConfig.from_json(args.stackup)
+    if args.copper_fill == "fr4":
+        for layer_cfg in config.layers:
+            layer_cfg.background_material = "FR4"
     vol, layer_names, layer_slices, _, spacing, material_ids = voxelize_stackup_config(
         config, args.stackup, return_material_ids=True)
     t_vox = perf_counter() - t0
@@ -241,9 +426,12 @@ def main():
     mids_def = material_ids.copy()
     mids_def[gt] = AIR_ID
 
-    # 3. Simulate a Z sub-range and XY crop around the defect.
-    z0 = max(0, cu_slices[0] - args.z_margin)
-    z1 = min(vol.shape[0], next_cu[-1] + 1 + args.z_margin)
+    # 3. Simulate a Z range and XY crop around the defect.
+    if args.z_range == "full":
+        z0, z1 = 0, vol.shape[0]
+    else:
+        z0 = max(0, cu_slices[0] - args.z_margin)
+        z1 = min(vol.shape[0], next_cu[-1] + 1 + args.z_margin)
     rs = crop_window(center[0], args.crop, vol.shape[1])
     cs = crop_window(center[1], args.crop, vol.shape[2])
     sub = (slice(z0, z1), rs, cs)
@@ -258,6 +446,7 @@ def main():
                                    projection_backend=args.backend, action_name="delam_defect")
     t_sim = perf_counter() - t1
     gt_sub = gt[sub]
+    labels_sub = mids_def[sub]
     fr4_sub = material_ids[sub] == FR4_ID
 
     # 4. Optional naive baseline.
@@ -269,24 +458,15 @@ def main():
                          false_positive_voxels=int((pred & ~gt_sub).sum()))
         print(f"Baseline: {base_info}")
 
-    # 5. Figure.
-    z_gap_local = int(gap_z[len(gap_z) // 2] - z0)
-    row_xz = int(center[0] - rs.start)
+    # 5. Save data, then figures.
     short = lambda n: n.replace("picture-1-", "")
-    z_labels = []
-    for name, sl in zip(layer_names, layer_slices):
-        mid = (sl[0] + sl[-1]) / 2 - z0
-        if 0 <= mid < z1 - z0 and not name.endswith("_substrate"):
-            z_labels.append((mid, short(name) + " Cu"))
-    z_labels.append(((gap_z[0] + gap_z[-1]) / 2 - z0, "gap"))
-    z_labels.sort()
     params = dict(
-        stackup=str(args.stackup), layer=args.layer, layer_short=short(args.layer),
+        stackup=str(args.stackup), layer=args.layer, copper_fill=args.copper_fill,
         gap_slices=args.gap_slices, gap_um=args.gap_slices * spacing[2] * 1000,
         gap_z_global=[int(gap_z[0]), int(gap_z[-1])],
         blob_radius_mm=args.blob_radius_mm, blob_roughness=args.blob_roughness,
         blob_area_mm2=float(blob2d.sum() * spacing[0] * spacing[1]), seed=args.seed,
-        center_rc=[int(center[0]), int(center[1])], crop=args.crop,
+        center_rc=[int(center[0]), int(center[1])], crop=args.crop, z_range=args.z_range,
         sim_z=[z0, z1], sim_rows=[rs.start, rs.stop], sim_cols=[cs.start, cs.stop],
         sim_shape_zhw=list(recon_clean.shape), spacing_mm_xyz=list(spacing),
         backend=args.backend, num_angles=args.num_angles or max(recon_clean.shape[1:]),
@@ -295,14 +475,39 @@ def main():
     tag = f"gap{args.gap_slices}_r{args.blob_radius_mm:g}_seed{args.seed}_{args.backend}"
     if args.crop == 0:
         tag += "_full"
-    fig_path = args.out / f"delamination_{tag}.png"
-    np.savez_compressed(args.out / f"delamination_{tag}.npz", recon_clean=recon_clean,
-                        recon_defect=recon_def, gt_mask=gt_sub, fr4_mask=fr4_sub)
-    (args.out / f"delamination_{tag}.json").write_text(json.dumps(params, indent=2, default=lambda o: o.item()))
-    make_figure(fig_path, recon_clean, recon_def, gt_sub, z_gap_local, row_xz, z_labels,
-                spacing, params, pred, dice_val)
-    print(f"Saved {fig_path} (total {perf_counter() - t0:.1f} s: voxelize {t_vox:.1f} s, "
-          f"simulate {t_sim:.1f} s)")
+    if args.copper_fill == "air":
+        tag += "_cuair"
+    stem = args.out / f"delamination_{tag}"
+    npz_path = stem.with_suffix(".npz")
+    np.savez_compressed(npz_path, recon_clean=recon_clean, recon_defect=recon_def,
+                        gt_mask=gt_sub, fr4_mask=fr4_sub, material_ids=labels_sub,
+                        spacing_mm=np.asarray(spacing), origin_zrc=np.array([z0, rs.start, cs.start]))
+    stem.with_suffix(".json").write_text(json.dumps(params, indent=2, default=lambda o: o.item()))
+
+    trace_name = layer_names[li + 2] if li + 2 < len(layer_names) else args.layer
+    fr4_level = float(np.median(recon_clean[fr4_sub]))
+    gap_lo, gap_hi = int(gap_z[0] - z0), int(gap_z[-1] - z0)
+    row = int(center[0] - rs.start)
+    col = int(center[1] - cs.start)
+    zoom_half = int(round(4.5 / spacing[0]))  # +-4.5 mm around the defect centre
+    S = SimpleNamespace(
+        labels=labels_sub, gt=gt_sub, clean=recon_clean, defect=recon_def, pred=pred, dice=dice_val,
+        row=row, row_global=int(center[0]), rows=rs, cols=cs, spacing=spacing,
+        z_gap=(gap_lo + gap_hi) // 2, gap_mid=(gap_lo + gap_hi) / 2, trace_z=int(next_cu[0] - z0),
+        zoom=(max(0, col - zoom_half), min(recon_clean.shape[2], col + zoom_half),
+              max(0, int(cu_slices[0] - z0) - 4), min(recon_clean.shape[0], int(next_cu[-1] - z0) + 5)),
+        cu_ticks=[((sl[0] + sl[-1]) / 2 - z0, short(n) + " Cu") for n, sl in zip(layer_names, layer_slices)
+                  if not n.endswith("_substrate")],
+        exag=spacing[0] / spacing[2], vmin=0.0, vmax=2.5 * fr4_level,
+        board_plane=material_ids[cu_slices[0]] == COPPER_ID,
+        board_traces=material_ids[next_cu[0]] == COPPER_ID, board_blob=blob2d,
+        plane_name=short(args.layer), trace_name=short(trace_name), copper_fill=args.copper_fill,
+        gap_um=params["gap_um"], blob_area_mm2=params["blob_area_mm2"],
+    )
+    paths = make_figures(stem, S)
+    print(f"Saved {paths[0]} (+{len(paths) - 1} panel PNGs) and {npz_path.name}; total "
+          f"{perf_counter() - t0:.1f} s (voxelize {t_vox:.1f} s, simulate {t_sim:.1f} s)")
+    print(f"3D view: python {Path(__file__).name} --view-3d {npz_path}")
 
 
 if __name__ == "__main__":
