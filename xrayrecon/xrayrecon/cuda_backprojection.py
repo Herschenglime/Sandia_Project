@@ -44,6 +44,8 @@ class _CompiledKernel:
         else:
             candidates = list(lib_dir.glob("libnvrtc.so*"))
             candidates += list(lib_dir.parent.parent.glob("nvidia/cuda_nvrtc/lib/libnvrtc.so*"))
+            # CUDA 13 wheels put every library under nvidia/cu13/lib.
+            candidates += list(lib_dir.parent.parent.glob("nvidia/cu*/lib/libnvrtc.so*"))
             library = str(sorted(candidates)[0]) if candidates else ctypes.util.find_library("nvrtc")
             if not library:
                 raise RuntimeError("NVRTC shared library is missing from the CUDA installation")
