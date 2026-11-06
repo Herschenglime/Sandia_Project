@@ -6,8 +6,8 @@ See demo_delamination_poc.md for how the blister is built and how the scan is
 simulated.
 
 Run from the xrayrecon/ directory:
-    python demo_delamination_poc.py                      # 256x256 crop, CPU
-    python demo_delamination_poc.py --backend cuda --crop 0
+    python demo_delamination_poc.py --backend cuda       # whole board
+    python demo_delamination_poc.py --crop 256           # 256x256 crop, quick CPU check
     python demo_delamination_poc.py --view-3d demo_output/delamination_poc/<run>.npz
 """
 import argparse
@@ -34,6 +34,7 @@ FR4_ID = MATERIAL_NAMES.index("FR4")
 GAP_RGB = (0.00, 0.72, 0.85)
 COPPER_RGB = (0.85, 0.50, 0.15)
 FR4_RGB = (0.80, 0.75, 0.55)
+AUTO_CENTER_HALF = 128  # auto_center scores a 256 px window, independent of --crop
 
 
 def parse_args():
@@ -52,8 +53,9 @@ def parse_args():
                    help="0 = ellipse, larger = more irregular outline")
     p.add_argument("--center", type=int, nargs=2, metavar=("ROW", "COL"), default=None,
                    help="blister centre in board pixels (default: auto, on solid plane copper)")
-    p.add_argument("--crop", type=int, default=256,
-                   help="XY crop size (px) around the blister for simulation; 0 = full board")
+    p.add_argument("--crop", type=int, default=0,
+                   help="XY crop size (px) around the blister for simulation; 0 = full board "
+                        "(e.g. 256 for a quick CPU check)")
     p.add_argument("--copper-fill", choices=["fr4", "air"], default="fr4",
                    help="material between traces on copper layers (the stackup JSON says air)")
     p.add_argument("--num-angles", type=int, default=None,
@@ -250,8 +252,10 @@ def view_3d(npz_path, z_exag):
     top_sheet.setDepthValue(10)
     view.addItem(top_sheet)
 
-    center = pg.Vector(w * dx / 2, (h - 1 - cut_row / 2) * dy, nz * sz / 2)
-    view.setCameraPosition(pos=center, distance=1.4 * w * dx, elevation=28, azimuth=-62)
+    # Start on the blister where it meets the cut face; zoom out for the whole board.
+    cut_col = int(d["center_rc_crop"][1])
+    center = pg.Vector(cut_col * dx, (h - 1 - cut_row) * dy, int(d["interface_z"]) * sz)
+    view.setCameraPosition(pos=center, distance=36, elevation=28, azimuth=-62)
     view.resize(1400, 900)
     view.show()
     pg.exec()
@@ -266,15 +270,17 @@ def make_figure(path, clean, defect, board, spacing, title):
     import matplotlib.pyplot as plt
 
     lo, hi = np.percentile(clean[board], [1, 99])
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6.4))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7 * clean.shape[0] / clean.shape[1] + 1.4))
     for ax, img, name in zip(axes, (clean, defect), ("Clean board", "Seeded blister")):
         ax.imshow(img, cmap="gray", vmin=lo, vmax=hi, interpolation="nearest")
         ax.set_title(name, fontsize=14)
         ax.set_axis_off()
-    bar = 5 / spacing[0]
+    bar_mm = 10 if clean.shape[1] * spacing[0] > 40 else 5
+    bar = bar_mm / spacing[0]
     hgt = clean.shape[0]
-    axes[0].plot([8, 8 + bar], [hgt - 8] * 2, color="black", lw=4, solid_capstyle="butt")
-    axes[0].text(8 + bar / 2, hgt - 14, "5 mm", ha="center", fontsize=11,
+    pad = hgt / 32
+    axes[0].plot([pad, pad + bar], [hgt - pad] * 2, color="black", lw=4, solid_capstyle="butt")
+    axes[0].text(pad + bar / 2, hgt - 1.8 * pad, f"{bar_mm} mm", ha="center", fontsize=11,
                  bbox=dict(fc="white", ec="none", pad=1))
     fig.suptitle(title, fontsize=15)
     fig.tight_layout(rect=(0, 0.03, 1, 0.95))
@@ -326,10 +332,9 @@ def main():
                                                          material_ids.dtype)])
 
     # 2. Blister: irregular outline, clamped-plate dome, layers above lifted.
-    half = (args.crop or max(vol.shape[1:3])) // 2
     above = layer_slices[li + 2] if li + 2 < len(layer_slices) else layer_slices[li - 2]
     center = tuple(args.center) if args.center else auto_center(
-        material_ids, z_i, int(above[0]), min(half, min(vol.shape[1:3]) // 2))
+        material_ids, z_i, int(above[0]), AUTO_CENTER_HALF)
     blob2d = irregular_blob(vol.shape[1:3], center, args.blob_radius_mm / spacing[0],
                             args.blob_roughness, rng)
     lift = np.rint(peak * blister_profile(blob2d)).astype(int)

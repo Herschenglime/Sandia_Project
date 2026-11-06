@@ -4,10 +4,12 @@
 
 ```bash
 cd xrayrecon
-uv run --extra cuda python demo_delamination_poc.py                    # 256x256 crop, CPU, ~95 s
-uv run --extra cuda python demo_delamination_poc.py --backend cuda --crop 0
+uv run --extra cuda python demo_delamination_poc.py --backend cuda     # whole board
+uv run --extra cuda python demo_delamination_poc.py --crop 256         # 256x256 crop around the blister, CPU, ~95 s
 uv run --extra cuda python demo_delamination_poc.py --view-3d demo_output/delamination_poc/<run>.npz
 ```
+
+On GNOME Wayland, prefix the `--view-3d` command with `QT_QPA_PLATFORM=wayland`; otherwise Qt falls back to X11 and OpenGL fails to initialise.
 
 ## 1. Board model
 
@@ -30,7 +32,7 @@ A blister is a local delamination where the separated layers swell outward. A co
    - it starts from an ellipse with a random aspect ratio and angle, radius `--blob-radius-mm` (3 mm);
    - the edge is pushed in and out by smoothed random noise (`--blob-roughness`);
    - the result is seeded by `--seed`.
-2. **Centre.** By default it sits on solid L7 copper, in a window with many traces on the layer above (`auto_center`). Use `--center ROW COL` to override.
+2. **Centre.** By default it sits on solid L7 copper, in a 256 px window with many traces on the layer above (`auto_center`), at board pixel (356, 340) for picture1. The location doesn't depend on `--crop`. Use `--center ROW COL` to override.
 3. **Height profile.** `blister_profile` solves the membrane equation −∇²u = 1 inside the outline, with u = 0 on the edge, normalises u to 1, and squares it.
    - For a circle this is exactly the deflection of a clamped plate under uniform pressure, (1 − r²/a²)². The dome meets the board tangentially at the edge, so the gap thins smoothly to zero instead of ending in a step.
    - For an irregular outline it gives a smooth dome that follows the outline.
@@ -49,12 +51,12 @@ A blister is a local delamination where the separated layers swell outward. A co
 
 ## 3. How the scan is simulated
 
-Both volumes go through `ct_simulation.simulate_ct_volume` over the same XY crop (default 256 × 256 px around the blister, `--crop 0` for the whole board) and the full Z stack. For each Z slice independently:
+Both volumes go through `ct_simulation.simulate_ct_volume` over the whole board by default (`--crop N` simulates an N × N px window around the blister instead) and the full Z stack. For each Z slice independently:
 
 1. **Attenuation proxy:** μ = effective atomic number × relative electron density.
    - FR4 ≈ 11, copper ≈ 214, air ≈ 0.007.
    - This is a contrast proxy, not a calibrated attenuation coefficient at any beam energy.
-2. **Forward projection:** a parallel-beam Radon transform (`skimage.transform.radon`, or the CUDA projector with `--backend cuda`). It uses `num_angles` evenly spaced angles over 180°, by default max(H, W) = 256. `circle=False` keeps the corners of the slice.
+2. **Forward projection:** a parallel-beam Radon transform (`skimage.transform.radon`, or the CUDA projector with `--backend cuda`). It uses `num_angles` evenly spaced angles over 180°, by default max(H, W) (611 for the whole board). `circle=False` keeps the corners of the slice.
 3. **Reconstruction:** ramp-filtered back-projection (`iradon`, or the CUDA backprojector), cropped back to the slice size.
 
 **What the output contains:** this produces the real artifacts of filtered back-projection: streaks and ringing around dense copper, for example the black-and-white banding inside signal layers.
@@ -94,6 +96,8 @@ Written to `demo_output/delamination_poc/blister_<layer>_peak<um>_r<mm>_seed<n>_
 - **Cut face:** shows the material section (FR4 tan, copper orange, gap cyan).
 - **Top surface:** a translucent sheet.
 - **Exaggeration:** Z is exaggerated `--z-exag` times (default 5; 1 = true scale).
+- **Camera:** starts aimed at the blister on the cut face; zoom out with the wheel to see the whole board.
+- **Mesh detail:** large volumes (such as the whole board) are meshed at half resolution so the window stays responsive.
 
 Keys:
 - **C:** switch the cut face between the material model and the simulated CT.
