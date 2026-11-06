@@ -271,7 +271,7 @@ def make_figure(path, clean, defect, board, spacing, title):
 
     lo, hi = np.percentile(clean[board], [1, 99])
     fig, axes = plt.subplots(1, 2, figsize=(14, 7 * clean.shape[0] / clean.shape[1] + 1.4))
-    for ax, img, name in zip(axes, (clean, defect), ("Clean board", "Seeded blister")):
+    for ax, img, name in zip(axes, (clean, defect), ("Original Board", "Simulated Delamination")):
         ax.imshow(img, cmap="gray", vmin=lo, vmax=hi, interpolation="nearest")
         ax.set_title(name, fontsize=14)
         ax.set_axis_off()
