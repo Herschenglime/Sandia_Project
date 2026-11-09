@@ -20,8 +20,7 @@
       "Bash(python3 -c \"import qtextras; help\\(qtextras.ButtonCollection\\)\")",
       "Bash(python -c \"import qtextras; print\\(dir\\(qtextras\\)\\)\")",
       "Bash(find /c/Users/patri/git/sandia-2025 -name *.py -path */qtextras/*)",
-      "Bash(/c/Users/patri/anaconda3/envs/pytorch/python.exe -c \"import pyqtgraph as pg; print\\(hasattr\\(pg, ''Vector''\\)\\); from pyqtgraph import Vector; print\\(''ok''\\)\")",
-      "Bash(git status *)"
+      "Bash(/c/Users/patri/anaconda3/envs/pytorch/python.exe -c \"import pyqtgraph as pg; print\\(hasattr\\(pg, ''Vector''\\)\\); from pyqtgraph import Vector; print\\(''ok''\\)\")"
     ]
   }
 }
