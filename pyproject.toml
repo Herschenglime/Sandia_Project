@@ -61,3 +61,11 @@ filterwarnings = [
     "error::RuntimeWarning:xrayrecon\\..*",
     "error::FutureWarning:xrayrecon\\..*",
 ]
+
+[tool.uv]
+# pyqt5-qt5 5.15.3+ ships no Windows wheels; make the lock pick a version that
+# installs on Windows as well as Linux and macOS.
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
