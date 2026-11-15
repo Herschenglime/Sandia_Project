@@ -5,11 +5,11 @@ CT of the clean and blistered boards, and view the result in 3D.
 See demo_delamination_poc.md for how the blister is built and how the scan is
 simulated.
 
-Run from the xrayrecon/ directory:
-    python demo_delamination_poc.py --backend cuda       # whole board
-    python demo_delamination_poc.py --crop 256           # 256x256 crop, quick CPU check
-    python demo_delamination_poc.py --view-3d demo_output/delamination_poc/<run>.npz
-    python demo_delamination_poc.py --view-3d <run>.npz --no-cut --copper-alpha 0.12 --spin-out spin.gif
+Run from the repo root:
+    uv run --extra cuda python demo/demo_delamination_poc.py --backend cuda       # whole board
+    uv run python demo/demo_delamination_poc.py --crop 256           # 256x256 crop, quick CPU check
+    uv run python demo/demo_delamination_poc.py --view-3d demo/demo_output/delamination_poc/<run>.npz
+    uv run python demo/demo_delamination_poc.py --view-3d <run>.npz --no-cut --copper-alpha 0.12 --spin-out spin.gif
 """
 import argparse
 import json
@@ -23,9 +23,9 @@ from scipy.sparse.linalg import spsolve
 
 from xrayrecon.materials import MATERIAL_NAMES, MATERIALS_DB
 
-DEFAULT_STACKUP = Path(
-    "/home/paul/dev/Sandia_Project/CAD_CT_Dataset_PCBCT/picture1/picture1_stackup.json"
-)
+# The PCBCT CAD/CT dataset, unzipped at the repo root (not tracked).
+DEFAULT_STACKUP = (Path(__file__).resolve().parents[1] / "dataset_relative_path_stackups"
+                   / "CAD_CT_Dataset_PCBCT" / "picture1" / "picture1_stackup.json")
 DEFAULT_OUT = Path(__file__).resolve().parent / "demo_output" / "delamination_poc"
 
 AIR_ID = MATERIAL_NAMES.index("AIR")

@@ -17,12 +17,12 @@ photoelectric basis f1(E) = E**-3 is ~1e-5 at 50 keV, so a1 carries essentially
 no signal and its Z_eff panel is streak noise. xrayrecon normalizes
 f1 = (50 keV / E)**3, which is why it recovers Z_eff.
 
-Outputs (default --outdir is the Obsidian slide-figure folder):
+Outputs (default --outdir is demo/demo_output/am_slide_diagram):
     42-am-material-pipeline.png / .svg   4-panel flow
     42-am-material-minimal.png  / .svg   2-panel fallback (board -> material map)
 
 Run from repo root:
-    uv run python notebooks/Spectral-Xray/make_am_slide_diagram.py
+    uv run python demo/make_am_slide_diagram.py
 """
 
 from __future__ import annotations
@@ -41,8 +41,9 @@ from scipy.ndimage import median_filter  # noqa: E402
 from skimage.transform import iradon  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-sys.path.insert(0, HERE)
+REPO = os.path.abspath(os.path.join(HERE, ".."))
+# The phantom geometry comes from the notebook script, which stays in notebooks/.
+sys.path.insert(0, os.path.join(REPO, "notebooks", "Spectral-Xray"))
 sys.path.insert(0, os.path.join(REPO, "xrayrecon"))
 
 import make_am_process_diagram as legacy  # noqa: E402  (phantom geometry only)
@@ -58,7 +59,7 @@ from xrayrecon.materials import (  # noqa: E402
     material_labels_to_zeff_rhoe,
 )
 
-DEFAULT_OUTDIR = r"C:\Users\Paul\Documents\obsidian-vault\Sandia Project\Claude\Slide Figures"
+DEFAULT_OUTDIR = os.path.join(HERE, "demo_output", "am_slide_diagram")
 
 # legacy phantom material key -> xrayrecon MATERIALS_DB key
 LEGACY_TO_DB = {"air": "AIR", "fr4": "FR4", "copper": "COPPER", "solder": "SOLDER"}

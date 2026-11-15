@@ -14,8 +14,8 @@ Layer/region were found by template-matching the presenter's GUI screenshot
 against the volume (run with --match to redo it).
 
 Run from the repo root:
-    uv run python xrayrecon/demo_void_highlight.py
-    uv run python xrayrecon/demo_void_highlight.py --match SCREENSHOT.png
+    uv run python demo/demo_void_highlight.py
+    uv run python demo/demo_void_highlight.py --match SCREENSHOT.png
 """
 import argparse
 from pathlib import Path
@@ -32,7 +32,7 @@ from skimage import measure, morphology
 
 REPO = Path(__file__).resolve().parents[1]
 DATA = REPO / "NPY" / "slice_data.npy"
-OUT = Path(r"C:\Users\Paul\Documents\obsidian-vault\Sandia Project\Claude\Slide Figures")
+OUT = Path(__file__).resolve().parent / "demo_output" / "void_highlight"
 
 # Result of --match against "Pasted image 20261112084753.png" (r = 0.987):
 # slices 158..160 (mean), no flip/rotation, screenshot scale 0.348 px/voxel.

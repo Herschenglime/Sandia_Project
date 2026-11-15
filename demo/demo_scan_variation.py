@@ -23,8 +23,8 @@ photon fluence fixed, so each coarse detector bin collects factor^2 times the
 counts of a native bin (2x wider in-plane, 2x thicker slice).
 
 Run from the repo root:
-    uv run python xrayrecon/demo_scan_variation.py
-    uv run python xrayrecon/demo_scan_variation.py --out-dir some/folder
+    uv run python demo/demo_scan_variation.py
+    uv run python demo/demo_scan_variation.py --out-dir some/folder
 """
 from __future__ import annotations
 

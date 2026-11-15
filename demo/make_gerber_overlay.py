@@ -3,7 +3,7 @@ Flat, top-down view of a board's copper layers stacked on top of each other,
 in the style of a PCB editor (KiCad's default layer colours), for slides.
 
 Run from the repo root:
-    python xrayrecon/make_gerber_overlay.py --stackup <stackup.json> --out overlay.png
+    uv run python demo/make_gerber_overlay.py --stackup <stackup.json> --out overlay.png
 """
 import argparse
 from pathlib import Path

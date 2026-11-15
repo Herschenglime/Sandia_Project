@@ -10,7 +10,7 @@ Nothing here performs real defect detection; the boxes/table rows are
 hand-placed illustrations for a roadmap slide. app.py is not modified.
 
 Run from repo root:
-    uv run python xrayrecon/mock_localize_screenshot.py
+    uv run python demo/mock_localize_screenshot.py
 """
 
 from __future__ import annotations
@@ -30,9 +30,7 @@ from qtextras import bindInteractorOptions as bind
 from xrayrecon.gui import MainWin
 
 REPO = Path(__file__).resolve().parents[1]
-OUT_DIR = Path(
-    r"C:\Users\Paul\Documents\obsidian-vault\Sandia Project\Claude\Slide Figures"
-)
+OUT_DIR = Path(__file__).resolve().parent / "demo_output" / "localize_mock"
 OUT_FULL = OUT_DIR / "48-xrayrecon-localize-mock.png"
 OUT_CROP = OUT_DIR / "48-xrayrecon-localize-mock-crop.png"
 

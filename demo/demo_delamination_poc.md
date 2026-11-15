@@ -3,10 +3,9 @@
 `demo_delamination_poc.py` takes the PCBCT `picture1` board, builds a voxel model from its Gerbers, and seeds a blister under one copper layer. It then simulates a CT scan of both the clean and the blistered board, and shows the blistered model in a small 3D viewer. It is a proof of concept for a figure, not a defect model: everything below is a deliberate simplification.
 
 ```bash
-cd xrayrecon
-uv run --extra cuda python demo_delamination_poc.py --backend cuda     # whole board
-uv run --extra cuda python demo_delamination_poc.py --crop 256         # 256x256 crop around the blister, CPU, ~95 s
-uv run --extra cuda python demo_delamination_poc.py --view-3d demo_output/delamination_poc/<run>.npz
+uv run --extra cuda python demo/demo_delamination_poc.py --backend cuda     # whole board
+uv run python demo/demo_delamination_poc.py --crop 256         # 256x256 crop around the blister, CPU, ~95 s
+uv run python demo/demo_delamination_poc.py --view-3d demo/demo_output/delamination_poc/<run>.npz
 ```
 
 On GNOME Wayland, prefix the `--view-3d` command with `QT_QPA_PLATFORM=wayland`; otherwise Qt falls back to X11 and OpenGL fails to initialise.
@@ -110,5 +109,5 @@ Keys:
 **Spin capture:** `--spin-out PATH` orbits the camera once around the start view (`--spin-frames`, default 120, at `--spin-fps` 15), writes the frames `--spin-width` px wide (default 800), and exits instead of staying open. A `.gif` loops; `.mp4` is MPEG-4 Part 2 through OpenCV; `.png` writes only the first frame. The window shows briefly while it renders.
 
 ```bash
-uv run python demo_delamination_poc.py --view-3d RUN.npz --no-cut --z-exag 8 --copper-alpha 0.12 --spin-out spin.gif
+uv run python demo/demo_delamination_poc.py --view-3d RUN.npz --no-cut --z-exag 8 --copper-alpha 0.12 --spin-out spin.gif
 ```
