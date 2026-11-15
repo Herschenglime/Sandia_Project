@@ -86,14 +86,16 @@ Written to `demo_output/delamination_poc/blister_<layer>_peak<um>_r<mm>_seed<n>_
   - `origin_zrc`: where the crop sits on the board
   - `center_rc_crop`
   - `interface_z`
+  - with `--save-labels`: `material_ids_clean` (the model before the blister) and `new_air_label`, the voxels that are AIR after injection but not before. It matches `gt_mask`; the run prints how many voxels differ.
 - **`.json`:** every parameter and the timings.
 
 ## 5. 3D viewer
 
-`--view-3d RUN.npz` opens a pyqtgraph OpenGL window with a cutaway through the blister centre.
+`--view-3d RUN.npz` opens a pyqtgraph OpenGL window with a cutaway through the blister's peak.
 
-- **Surfaces:** copper and the gap are shaded surfaces (marching cubes). FR4 is not drawn.
-- **Cut face:** shows the material section (FR4 tan, copper orange, gap cyan).
+- **Surfaces:** copper and the gap are shaded surfaces (marching cubes). FR4 is not drawn. The gap is red against muted copper; `--copper-alpha 0.15` makes the copper translucent so the gap shows through the planes.
+- **Cut face:** shows the material section (FR4 pale tan, copper brown, gap red).
+- **`--no-cut`:** draws the whole crop with no cut face, and frames all of it.
 - **Top surface:** a translucent sheet.
 - **Exaggeration:** Z is exaggerated `--z-exag` times (default 5; 1 = true scale).
 - **Camera:** starts aimed at the blister on the cut face; zoom out with the wheel to see the whole board.
@@ -104,3 +106,9 @@ Keys:
 - **T:** show or hide the board-top sheet.
 - **S:** save a PNG next to the `.npz` (`<run>_3d_<n>.png`).
 - Mouse drag rotates the view, and the wheel zooms.
+
+**Spin capture:** `--spin-out PATH` orbits the camera once around the start view (`--spin-frames`, default 120, at `--spin-fps` 15), writes the frames `--spin-width` px wide (default 800), and exits instead of staying open. A `.gif` loops; `.mp4` is MPEG-4 Part 2 through OpenCV; `.png` writes only the first frame. The window shows briefly while it renders.
+
+```bash
+uv run python demo_delamination_poc.py --view-3d RUN.npz --no-cut --z-exag 8 --copper-alpha 0.12 --spin-out spin.gif
+```

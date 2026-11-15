@@ -9,6 +9,7 @@ Run from the xrayrecon/ directory:
     python demo_delamination_poc.py --backend cuda       # whole board
     python demo_delamination_poc.py --crop 256           # 256x256 crop, quick CPU check
     python demo_delamination_poc.py --view-3d demo_output/delamination_poc/<run>.npz
+    python demo_delamination_poc.py --view-3d <run>.npz --no-cut --copper-alpha 0.12 --spin-out spin.gif
 """
 import argparse
 import json
@@ -31,9 +32,9 @@ AIR_ID = MATERIAL_NAMES.index("AIR")
 COPPER_ID = MATERIAL_NAMES.index("COPPER")
 FR4_ID = MATERIAL_NAMES.index("FR4")
 
-GAP_RGB = (0.00, 0.72, 0.85)
-COPPER_RGB = (0.85, 0.50, 0.15)
-FR4_RGB = (0.80, 0.75, 0.55)
+GAP_RGB = (0.90, 0.10, 0.05)
+COPPER_RGB = (0.72, 0.58, 0.42)
+FR4_RGB = (0.86, 0.84, 0.76)
 AUTO_CENTER_HALF = 128  # auto_center scores a 256 px window, independent of --crop
 
 
@@ -61,10 +62,26 @@ def parse_args():
     p.add_argument("--num-angles", type=int, default=None,
                    help="projection angles (default: max(H, W) of the simulated crop)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--save-labels", action="store_true",
+                   help="also save material_ids_clean and new_air_label (voxels that are AIR "
+                        "after injection but not before) in the npz")
     p.add_argument("--view-3d", type=Path, default=None, metavar="NPZ",
                    help="open a saved run in a standalone 3D window instead of running the pipeline")
     p.add_argument("--z-exag", type=float, default=5.0,
                    help="with --view-3d: vertical exaggeration (1 = true scale)")
+    p.add_argument("--copper-alpha", type=float, default=1.0,
+                   help="with --view-3d: copper surface opacity (< 1 shows the gap through the planes)")
+    p.add_argument("--no-cut", action="store_true",
+                   help="with --view-3d: draw the whole crop instead of a cutaway, with the "
+                        "camera framing all of it (pair with --copper-alpha)")
+    p.add_argument("--spin-out", type=Path, default=None, metavar="PATH",
+                   help="with --view-3d: orbit the camera once, write a looping .gif or .mp4 "
+                        "(or just the first frame, for .png) and exit")
+    p.add_argument("--spin-frames", type=int, default=120,
+                   help="with --spin-out: frames per orbit")
+    p.add_argument("--spin-fps", type=float, default=15.0)
+    p.add_argument("--spin-width", type=int, default=800,
+                   help="with --spin-out: output width in px")
     return p.parse_args()
 
 
@@ -159,35 +176,82 @@ def crop_window(center, size, extent):
 
 # ── 3D view ─────────────────────────────────────────────────────────────────
 
-def view_3d(npz_path, z_exag):
+def write_spin(view, path, frames, fps, width):
+    """Orbit the camera once about its centre, grabbing each frame, and write a
+    looping GIF (Pillow) or MP4 (OpenCV, MPEG-4 Part 2); for .png, only the
+    first frame is written."""
+    import pyqtgraph as pg
+    from PIL import Image
+
+    suffix = path.suffix.lower()
+    frames = 1 if suffix == ".png" else frames
+    az0 = view.opts["azimuth"]
+    imgs = []
+    for i in range(frames):
+        view.setCameraPosition(azimuth=az0 + 360 * i / frames)
+        qimg = view.grabFramebuffer().convertToFormat(pg.QtGui.QImage.Format.Format_RGB888)
+        img = Image.fromarray(pg.functions.ndarray_from_qimage(qimg).copy())
+        imgs.append(img.resize((width, round(img.height * width / img.width)), Image.LANCZOS))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if suffix == ".png":
+        imgs[0].save(path)
+    elif suffix == ".mp4":
+        import cv2
+        out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, imgs[0].size)
+        for img in imgs:
+            out.write(cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR))
+        out.release()
+    else:
+        # One shared palette, no dithering: keeps the GIF small and the colours steady.
+        sheet = Image.new("RGB", (imgs[0].width, imgs[0].height * 4))
+        for k in range(4):
+            sheet.paste(imgs[k * frames // 4], (0, k * imgs[0].height))
+        colors = np.array(sheet.quantize(255, method=Image.Quantize.MEDIANCUT).getpalette())
+        colors = colors.reshape(-1, 3)
+        colors[colors.min(axis=1) >= 245] = 255  # near-white entries -> pure white background
+        pal = Image.new("P", (1, 1))
+        pal.putpalette(colors.astype(np.uint8).ravel().tolist())
+        gif = [im.quantize(palette=pal, dither=Image.Dither.NONE) for im in imgs]
+        gif[0].save(path, save_all=True, append_images=gif[1:], loop=0,
+                    duration=10 * round(100 / fps))  # GIF delays are in 1/100 s
+    print(f"Saved {path} ({frames} frames at {fps:g} fps)")
+
+
+def view_3d(npz_path, z_exag, copper_alpha=1.0, no_cut=False,
+            spin_out=None, spin_frames=120, spin_fps=15.0, spin_width=800):
     """Cutaway of the blistered model: copper and the gap as shaded surfaces,
     the cut face as a material section (or simulated CT), and the board top
-    as a translucent sheet. Keys: C cut face model/CT, T top sheet, S save PNG."""
+    as a translucent sheet. Keys: C cut face model/CT, T top sheet, S save PNG.
+    With no_cut the whole crop is drawn and there is no cut face. With
+    spin_out, write a camera orbit to that file and return instead."""
     import pyqtgraph as pg
     import pyqtgraph.opengl as gl
     from skimage.measure import marching_cubes
 
     d = np.load(npz_path)
     mids, gap, recon = d["material_ids"], d["gt_mask"], d["recon_defect"]
-    cut_row = int(d["center_rc_crop"][0])
+    lift = d["lift_slices"]
+    cut_row, cut_col = np.rint(np.argwhere(lift == lift.max()).mean(0)).astype(int)  # blister peak
     dx, dy, dz = d["spacing_mm"]
     sz = dz * z_exag
     nz, h, w = mids.shape
     keep = np.zeros(h, dtype=bool)
     keep[:cut_row + 1] = True  # far half; the camera looks at the cut from the removed side
+    if no_cut:
+        keep[:] = True
 
     def to_gl(z, row, col):
         # GL x = column, y = rows flipped (matches a top-down image), z = up
         return np.column_stack([col * dx, (h - 1 - row) * dy, z * sz])
 
-    def surface(mask, color):
+    def surface(mask, color, **kw):
         m = np.pad(mask[:, keep], 1).astype(np.float32)
         m = ndi.gaussian_filter(m, 0.5)
         step = 1 if m.size < 1e7 else 2  # keep full-board meshes interactive
         verts, faces, _, _ = marching_cubes(m, 0.45, step_size=step)
         verts -= 1  # undo the pad
         md = gl.MeshData(vertexes=to_gl(*verts.T), faces=faces)
-        return gl.GLMeshItem(meshdata=md, smooth=True, shader="shaded", color=color)
+        return gl.GLMeshItem(meshdata=md, smooth=True, shader="shaded", color=color, **kw)
 
     def section_image(rgba, y_off):
         # rgba is (Z, W, 4) for the cut row; GLImageItem wants (W, Z, 4)
@@ -217,12 +281,15 @@ def view_3d(npz_path, z_exag):
                 super().keyPressEvent(ev)
 
     view = View()
-    view.setWindowTitle(f"Seeded blister (cyan), Z x{z_exag:g} - C: cut face model/CT, "
+    view.setWindowTitle(f"Seeded blister (red), Z x{z_exag:g} - C: cut face model/CT, "
                         "T: top sheet, S: save PNG")
     view.setBackgroundColor("w")
 
-    view.addItem(surface(mids == COPPER_ID, COPPER_RGB + (1.0,)))
     view.addItem(surface(gap, GAP_RGB + (1.0,)))
+    copper = surface(mids == COPPER_ID, COPPER_RGB + (copper_alpha,),
+                     glOptions="opaque" if copper_alpha >= 1 else "translucent")
+    copper.setDepthValue(5)  # after the opaque gap, so translucent copper blends over it
+    view.addItem(copper)
 
     sec = mids[:, cut_row, :]
     rgba = np.zeros(sec.shape + (4,), dtype=np.uint8)
@@ -230,7 +297,6 @@ def view_3d(npz_path, z_exag):
     rgba[sec == COPPER_ID] = (*(int(255 * c) for c in COPPER_RGB), 255)
     rgba[gap[:, cut_row, :]] = (*(int(255 * c) for c in GAP_RGB), 255)
     model_face = section_image(rgba, 0.01)
-    view.addItem(model_face)
 
     ct = recon[:, cut_row, :]
     board = mids[:, cut_row, :] != AIR_ID
@@ -240,7 +306,9 @@ def view_3d(npz_path, z_exag):
     ct_rgba = np.stack([grey, grey, grey, np.where(below_top, 255, 0).astype(np.uint8)], axis=-1)
     ct_face = section_image(ct_rgba, 0.01)
     ct_face.setVisible(False)
-    view.addItem(ct_face)
+    if not no_cut:
+        view.addItem(model_face)
+        view.addItem(ct_face)
 
     # Board top: highest non-air voxel in each kept column.
     solid = mids[:, keep] != AIR_ID
@@ -253,11 +321,20 @@ def view_3d(npz_path, z_exag):
     view.addItem(top_sheet)
 
     # Start on the blister where it meets the cut face; zoom out for the whole board.
-    cut_col = int(d["center_rc_crop"][1])
-    center = pg.Vector(cut_col * dx, (h - 1 - cut_row) * dy, int(d["interface_z"]) * sz)
-    view.setCameraPosition(pos=center, distance=36, elevation=28, azimuth=-62)
+    # Without the cut, frame the whole crop around the blister instead.
+    if no_cut:
+        center = pg.Vector(cut_col * dx, (h - 1 - cut_row) * dy, 0.3 * top.max() * sz)
+        view.opts["fov"] = 30  # flatter perspective from further away
+        view.setCameraPosition(pos=center, distance=2.5 * np.hypot(w * dx, h * dy),
+                               elevation=30, azimuth=-62)
+    else:
+        center = pg.Vector(cut_col * dx, (h - 1 - cut_row) * dy, int(d["interface_z"]) * sz)
+        view.setCameraPosition(pos=center, distance=36, elevation=28, azimuth=-62)
     view.resize(1400, 900)
     view.show()
+    if spin_out is not None:
+        write_spin(view, spin_out, spin_frames, spin_fps, spin_width)
+        return
     pg.exec()
 
 
@@ -293,7 +370,8 @@ def make_figure(path, clean, defect, board, spacing, title):
 def main():
     args = parse_args()
     if args.view_3d is not None:
-        view_3d(args.view_3d, args.z_exag)
+        view_3d(args.view_3d, args.z_exag, args.copper_alpha, args.no_cut,
+                args.spin_out, args.spin_frames, args.spin_fps, args.spin_width)
         return
 
     from xrayrecon.ct_simulation import simulate_ct_volume
@@ -380,10 +458,16 @@ def main():
     stem = args.out / f"blister_{tag}"
     npz_path = stem.with_suffix(".npz")
     center_crop = np.array([center[0] - rs.start, center[1] - cs.start])
+    labels = {}
+    if args.save_labels:
+        new_air = (mids_def[sub] == AIR_ID) & (material_ids[sub] != AIR_ID)
+        labels = dict(material_ids_clean=material_ids[sub], new_air_label=new_air)
+        print(f"new_air_label: {int(new_air.sum())} voxels, "
+              f"{int((new_air != gt[sub]).sum())} differ from gt_mask")
     np.savez_compressed(npz_path, recon_clean=recon_clean, recon_defect=recon_def,
                         gt_mask=gt[sub], material_ids=mids_def[sub], lift_slices=lift[rs, cs],
                         spacing_mm=np.asarray(spacing), origin_zrc=np.array([0, rs.start, cs.start]),
-                        center_rc_crop=center_crop, interface_z=z_i)
+                        center_rc_crop=center_crop, interface_z=z_i, **labels)
     stem.with_suffix(".json").write_text(json.dumps(params, indent=2, default=lambda o: o.item()))
 
     # Plan view one slice above the interface: in the clean board this is the
